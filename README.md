@@ -4,7 +4,7 @@
 
  It's an one stage object detection algorithm and implemented based on YoloV3. It improved MAP to 44 while still keeps FPS same as YoloV3. Below image depicting the performance of Yolov4 compared with other algorithms.
 
- ![yolov4_performance](https://github.com/Qucy/yolo4-tf-27/blob/master/yolov4_performance.JPG)
+ ![yolov4_performance](https://github.com/Qucy/yolo4-tf-27/blob/master/img/yolov4_performance.JPG)
 
 To summary the change in YoloV4 which I thought is quite important and effective is as below
 
@@ -27,7 +27,7 @@ There are 2 main updates in the backbone network, DarkNet53 => CSPDarkNet53 and 
 
 If you familiar with YoloV3, the backbone network is consist of multiple residual blocks with down sampling layers. In YoloV4 the residual block is replaced by CSPNet. CSPNet can be divided into 2 parts, the left part is still original input and the right part is consist of multiple residual blocks. Left part and right part will concat at final layer. Below image depicting the different networks.
 
-![CSPDarknet](https://github.com/Qucy/yolo4-tf-27/blob/master/CSPDarknet.jpg)
+![CSPDarknet](https://github.com/Qucy/yolo4-tf-27/blob/master/img/CSPDarknet.jpg)
 
 #### 1.2 Activation function from LeakyReLU to Mish
 
@@ -35,7 +35,7 @@ The formula for Mish function and plot is as below, it is implemented in Tensorf
 $$
 Mish = x \times tanh(ln(1 + e^x))
 $$
-![mish_activation_function](https://github.com/Qucy/yolo4-tf-27/blob/master/mish_activation_function.jpg)
+![mish_activation_function](https://github.com/Qucy/yolo4-tf-27/blob/master/img/mish_activation_function.jpg)
 
 The source for CSPDarkNet53 is as below
 
