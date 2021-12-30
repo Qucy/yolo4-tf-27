@@ -84,12 +84,13 @@ def resblock_body(x, num_filters, num_blocks, all_narrow=True):
     # Use Conv 1x1 to adjust channels
     return DarknetConv2D_BN_Mish(num_filters, (1,1))(route)
 
-#---------------------------------------------------#
-#   darknet53 backbone network
-#   inputs image size = 416x416x3
-#   outputs 3 feature maps
-#---------------------------------------------------#
+
 def darknet_body(x):
+    """
+    darknet53 backbone network
+    :param x: input image with shape 416x416x3
+    :return: outputs 3 feature maps
+    """
     x = DarknetConv2D_BN_Mish(32, (3,3))(x)
     x = resblock_body(x, 64, 1, False)
     x = resblock_body(x, 128, 2)
