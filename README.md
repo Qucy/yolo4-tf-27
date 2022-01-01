@@ -111,7 +111,7 @@ def resblock_body(x, num_filters, num_blocks, all_narrow=True):
     shortconv = DarknetConv2D_BN_Mish(num_filters//2 if all_narrow else num_filters, (1,1))(preconv1)
 
 
-    # Create residual block by loop num_blocks
+    # Create residual blocks by loop num_blocks
     mainconv = DarknetConv2D_BN_Mish(num_filters//2 if all_narrow else num_filters, (1,1))(preconv1)
     for i in range(num_blocks):
         y = compose(
@@ -144,3 +144,169 @@ def darknet_body(x):
     feat3 = x
     return feat1,feat2,feat3
 ```
+
+#### 1.2 FPN - neck network upgrade
+
+FPN's network structure is as below if input image shape is 416 * 416. The main change compared to YoloV3 is:
+
+- using SPP network in the bottom layer
+- using PANet in the up sampling layers
+
+![fpn_neck](https://github.com/Qucy/yolo4-tf-27/blob/master/img/fpn_neck.jpg)
+
+##### 1.2.1 SPP
+
+SPP structure append at the bottom of CSPDarknet53, after the feature maps from CSPDarknet53, it will go through a convolution block by 3 times. And after that it will go through a 5x5, a 9x9,  a 13x13 and a 1x1 max pooling layer. It will help increase the receptive filed and provide more information.
+
+```python
+maxpool1 = MaxPooling2D(pool_size=(13,13), strides=(1,1), padding='same')(P5)
+maxpool2 = MaxPooling2D(pool_size=(9,9), strides=(1,1), padding='same')(P5)
+maxpool3 = MaxPooling2D(pool_size=(5,5), strides=(1,1), padding='same')(P5)
+P5 = Concatenate()([maxpool1, maxpool2, maxpool3, P5])
+```
+
+##### 1.2.2 PANet
+
+PANet was first used in instance segmentation algorithm in around 2018. Below image is the original PANet structure, the most important part is it will extract features from bottom up and top down for multiple times. In the image part (a) is the traditional FPN and in part (b) it will do up sampling again.
+
+![PANet](https://github.com/Qucy/yolo4-tf-27/blob/master/img/PANet.jpg)
+
+In YoloV4 the PANet is using for the 3 layer as below
+
+![fpn_panet](https://github.com/Qucy/yolo4-tf-27/blob/master/img/fpn_panet.jpg)
+
+Source code is as below
+
+```python
+def yolo_body(input_shape, anchors_mask, num_classes):
+    """
+    YoloV4 FPN and head network building
+    :param input_shape: image input shape
+    :param anchors_mask: anchor masks
+    :param num_classes: number of category classes
+    :return: Model
+    """
+    inputs = Input(input_shape)
+    # ---------------------------------------------------#
+    #   Create CSPdarknet53 backbone and return 3 feature maps
+    #   feat1 shape => 52,52,256
+    #   feat2 shape => 26,26,512
+    #   feat3 shape => 13,13,1024
+    # ---------------------------------------------------#
+    feat1, feat2, feat3 = darknet_body(inputs)
+
+    # 13,13,1024 -> 13,13,512 -> 13,13,1024 -> 13,13,512 -> 13,13,2048 -> 13,13,512 -> 13,13,1024 -> 13,13,512
+    P5 = DarknetConv2D_BN_Leaky(512, (1, 1))(feat3)
+    P5 = DarknetConv2D_BN_Leaky(1024, (3, 3))(P5)
+    P5 = DarknetConv2D_BN_Leaky(512, (1, 1))(P5)
+    # use SPP structure here
+    maxpool1 = MaxPooling2D(pool_size=(13, 13), strides=(1, 1), padding='same')(P5)
+    maxpool2 = MaxPooling2D(pool_size=(9, 9), strides=(1, 1), padding='same')(P5)
+    maxpool3 = MaxPooling2D(pool_size=(5, 5), strides=(1, 1), padding='same')(P5)
+    P5 = Concatenate()([maxpool1, maxpool2, maxpool3, P5])
+    P5 = DarknetConv2D_BN_Leaky(512, (1, 1))(P5)
+    P5 = DarknetConv2D_BN_Leaky(1024, (3, 3))(P5)
+    P5 = DarknetConv2D_BN_Leaky(512, (1, 1))(P5)
+
+    # 13,13,512 -> 13,13,256 -> 26,26,256
+    P5_upsample = compose(DarknetConv2D_BN_Leaky(256, (1, 1)), UpSampling2D(2))(P5)
+    # 26,26,512 -> 26,26,256
+    P4 = DarknetConv2D_BN_Leaky(256, (1, 1))(feat2)
+    # 26,26,256 + 26,26,256 -> 26,26,512
+    P4 = Concatenate()([P4, P5_upsample])
+
+    # 26,26,512 -> 26,26,256 -> 26,26,512 -> 26,26,256 -> 26,26,512 -> 26,26,256
+    P4 = make_five_convs(P4, 256)
+
+    # 26,26,256 -> 26,26,128 -> 52,52,128
+    P4_upsample = compose(DarknetConv2D_BN_Leaky(128, (1, 1)), UpSampling2D(2))(P4)
+    # 52,52,256 -> 52,52,128
+    P3 = DarknetConv2D_BN_Leaky(128, (1, 1))(feat1)
+    # 52,52,128 + 52,52,128 -> 52,52,256
+    P3 = Concatenate()([P3, P4_upsample])
+
+    # 52,52,256 -> 52,52,128 -> 52,52,256 -> 52,52,128 -> 52,52,256 -> 52,52,128
+    P3 = make_five_convs(P3, 128)
+
+    # ---------------------------------------------------#
+    #   y3 = (batch_size,52,52,3,85)
+    # ---------------------------------------------------#
+    P3_output = DarknetConv2D_BN_Leaky(256, (3, 3))(P3)
+    P3_output = DarknetConv2D(len(anchors_mask[0]) * (num_classes + 5), (1, 1))(P3_output)
+
+    # 52,52,128 -> 26,26,256
+    P3_downsample = ZeroPadding2D(((1, 0), (1, 0)))(P3)
+    P3_downsample = DarknetConv2D_BN_Leaky(256, (3, 3), strides=(2, 2))(P3_downsample)
+    # 26,26,256 + 26,26,256 -> 26,26,512
+    P4 = Concatenate()([P3_downsample, P4])
+    # 26,26,512 -> 26,26,256 -> 26,26,512 -> 26,26,256 -> 26,26,512 -> 26,26,256
+    P4 = make_five_convs(P4, 256)
+
+    # ---------------------------------------------------#
+    #   y2 = (batch_size,26,26,3,85)
+    # ---------------------------------------------------#
+    P4_output = DarknetConv2D_BN_Leaky(512, (3, 3))(P4)
+    P4_output = DarknetConv2D(len(anchors_mask[1]) * (num_classes + 5), (1, 1))(P4_output)
+
+    # 26,26,256 -> 13,13,512
+    P4_downsample = ZeroPadding2D(((1, 0), (1, 0)))(P4)
+    P4_downsample = DarknetConv2D_BN_Leaky(512, (3, 3), strides=(2, 2))(P4_downsample)
+    # 13,13,512 + 13,13,512 -> 13,13,1024
+    P5 = Concatenate()([P4_downsample, P5])
+    # 13,13,1024 -> 13,13,512 -> 13,13,1024 -> 13,13,512 -> 13,13,1024 -> 13,13,512
+    P5 = make_five_convs(P5, 512)
+
+    # ---------------------------------------------------#
+    #   y1 = (batch_size,13,13,3,85)
+    # ---------------------------------------------------#
+    P5_output = DarknetConv2D_BN_Leaky(1024, (3, 3))(P5)
+    P5_output = DarknetConv2D(len(anchors_mask[2]) * (num_classes + 5), (1, 1))(P5_output)
+
+    return Model(inputs, [P5_output, P4_output, P3_output])
+```
+
+
+
+### 2. Training tricks in YoloV4
+
+#### 2.1 Mosaic data argumentation
+
+YoloV4 use Mosaic data argumentation in data preprocess and Mosaic data argumentation is kind of borrow the ideal from CutMix data argumentation. CutMix is using 2 images to stitch a new image, the example is shown as below:
+
+![cutmix](https://github.com/Qucy/yolo4-tf-27/blob/master/img/cutmix.png)
+
+For Mosaic, it uses 4 images instead of 2, according to the paper using 4 images will provide a much more meaningful and complex background in the image. And when calculate BN it will include all 4 images information. Some examples is shown as below:
+
+![Mosaic](https://github.com/Qucy/yolo4-tf-27/blob/master/img/Mosaic.jpg)
+
+The implementation steps for Mosaic have 3 steps,  randomly pick 4 images and scaling, resize, flip these 4 images. Put these 4 images at top left, top right, bottom left and bottom right and stitch these 4 images one by one. Below image depicting the steps for Mosaic data argumentation.![Mosaic_step](https://github.com/Qucy/yolo4-tf-27/blob/master/img/Mosaic_step.jpg)
+
+
+
+#### 2.2 Label smoothing
+
+Label smoothing is a quite simple and formula is as below:
+
+```python
+new_onehot_labels = onehot_labels * (1 - label_smoothing) + label_smoothing / num_classes
+```
+
+When label smoothing = 0.01 the formula is as below:
+
+```python
+new_onehot_labels = onehot_labels * (1 - 0.01) + 0.01 / num_classes
+```
+
+For instance, if we are doing binary classification and our ground truth label is 0 and 1. If label smoothing is 0.005 then our ground truth label will turn into  0.005 and 0.995. By doing so we allow model can be not so perfect and prevent overfitting.
+
+
+
+#### 2.3 CIOU
+
+Coming soon
+
+
+
+#### 2.4 Cosine annealing learning rate
+
+Coming soon

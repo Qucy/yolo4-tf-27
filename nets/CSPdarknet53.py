@@ -1,5 +1,5 @@
 from functools import wraps
-
+import tensorflow as tf
 import tensorflow_addons as tfa
 from tensorflow.keras.initializers import RandomNormal
 from tensorflow.keras.layers import (Add, BatchNormalization, Conv2D, Concatenate, ZeroPadding2D, Layer)
@@ -69,7 +69,7 @@ def resblock_body(x, num_filters, num_blocks, all_narrow=True):
     shortconv = DarknetConv2D_BN_Mish(num_filters//2 if all_narrow else num_filters, (1,1))(preconv1)
 
 
-    # Create residual block by loop num_blocks
+    # Create residual blocks by loop num_blocks
     mainconv = DarknetConv2D_BN_Mish(num_filters//2 if all_narrow else num_filters, (1,1))(preconv1)
     for i in range(num_blocks):
         y = compose(
@@ -102,3 +102,8 @@ def darknet_body(x):
     feat3 = x
     return feat1,feat2,feat3
 
+if __name__== '__main__':
+    # test network
+    image = tf.random.normal([4, 416, 416, 3])
+    feat1, feat2, feat3= darknet_body(image)
+    print(image.shape, feat1.shape, feat2.shape, feat3.shape)

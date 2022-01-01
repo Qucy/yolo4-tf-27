@@ -1,88 +1,141 @@
-from tensorflow.keras.layers import Concatenate, Input, Lambda, UpSampling2D
+from tensorflow.keras.layers import (BatchNormalization, Concatenate, Input,
+                                     Lambda, LeakyReLU, MaxPooling2D,
+                                     UpSampling2D, ZeroPadding2D)
 from tensorflow.keras.models import Model
 from utils.utils import compose
 
-from nets.darknet import DarknetConv2D, DarknetConv2D_BN_Leaky, darknet_body
+from nets.CSPdarknet53 import DarknetConv2D, darknet_body
 from nets.yolo_training import yolo_loss
 
 
-#---------------------------------------------------#
-#   Conv * 5
-#---------------------------------------------------#
-def make_five_conv(x, num_filters):
-    x = DarknetConv2D_BN_Leaky(num_filters, (1,1))(x)
-    x = DarknetConv2D_BN_Leaky(num_filters*2, (3,3))(x)
-    x = DarknetConv2D_BN_Leaky(num_filters, (1,1))(x)
-    x = DarknetConv2D_BN_Leaky(num_filters*2, (3,3))(x)
-    x = DarknetConv2D_BN_Leaky(num_filters, (1,1))(x)
+
+def DarknetConv2D_BN_Leaky(*args, **kwargs):
+    """
+    DarknetConv2D + BatchNormalization + LeakyReLU
+    :param args:
+    :param kwargs:
+    :return:
+    """
+    no_bias_kwargs = {'use_bias': False}
+    no_bias_kwargs.update(kwargs)
+    return compose(
+        DarknetConv2D(*args, **no_bias_kwargs),
+        BatchNormalization(),
+        LeakyReLU(alpha=0.1))
+
+
+def make_five_convs(x, num_filters):
+    """
+    Make 5 Convolution layers
+    :param x: input features
+    :param num_filters: number of filters
+    :return:
+    """
+    x = DarknetConv2D_BN_Leaky(num_filters, (1, 1))(x)
+    x = DarknetConv2D_BN_Leaky(num_filters * 2, (3, 3))(x)
+    x = DarknetConv2D_BN_Leaky(num_filters, (1, 1))(x)
+    x = DarknetConv2D_BN_Leaky(num_filters * 2, (3, 3))(x)
+    x = DarknetConv2D_BN_Leaky(num_filters, (1, 1))(x)
     return x
 
-#---------------------------------------------------#
-#   Generate Yolo head
-#---------------------------------------------------#
-def make_yolo_head(x, num_filters, out_filters):
-    y = DarknetConv2D_BN_Leaky(num_filters*2, (3,3))(x)
-    # 255->3, 85->3, 4 + 1 + 80
-    y = DarknetConv2D(out_filters, (1,1))(y)
-    return y
 
-#---------------------------------------------------#
-#   Construct FPN network and prediction result
-#---------------------------------------------------#
+
 def yolo_body(input_shape, anchors_mask, num_classes):
-    inputs      = Input(input_shape)
-    #---------------------------------------------------#   
-    #   retrieve 3 feature maps from backbone network
-    #   shape are：
-    #   C3 => 52,52,256
-    #   C4 => 26,26,512
-    #   C5 => 13,13,1024
-    #---------------------------------------------------#
-    C3, C4, C5  = darknet_body(inputs)
+    """
+    YoloV4 FPN and head network building
+    :param input_shape: image input shape
+    :param anchors_mask: anchor masks
+    :param num_classes: number of category classes
+    :return: Model
+    """
+    inputs = Input(input_shape)
+    # ---------------------------------------------------#
+    #   Create CSPdarknet53 backbone and return 3 feature maps
+    #   feat1 shape => 52,52,256
+    #   feat2 shape => 26,26,512
+    #   feat3 shape => 13,13,1024
+    # ---------------------------------------------------#
+    feat1, feat2, feat3 = darknet_body(inputs)
 
-    #---------------------------------------------------#
-    #   Generate first FPN feature => P5 => (batch_size,13,13,3,85)
-    #---------------------------------------------------#
-    # 13,13,1024 -> 13,13,512 -> 13,13,1024 -> 13,13,512 -> 13,13,1024 -> 13,13,512
-    x   = make_five_conv(C5, 512)
-    P5  = make_yolo_head(x, 512, len(anchors_mask[0]) * (num_classes+5))
+    # 13,13,1024 -> 13,13,512 -> 13,13,1024 -> 13,13,512 -> 13,13,2048 -> 13,13,512 -> 13,13,1024 -> 13,13,512
+    P5 = DarknetConv2D_BN_Leaky(512, (1, 1))(feat3)
+    P5 = DarknetConv2D_BN_Leaky(1024, (3, 3))(P5)
+    P5 = DarknetConv2D_BN_Leaky(512, (1, 1))(P5)
+    # use SPP structure here
+    maxpool1 = MaxPooling2D(pool_size=(13, 13), strides=(1, 1), padding='same')(P5)
+    maxpool2 = MaxPooling2D(pool_size=(9, 9), strides=(1, 1), padding='same')(P5)
+    maxpool3 = MaxPooling2D(pool_size=(5, 5), strides=(1, 1), padding='same')(P5)
+    P5 = Concatenate()([maxpool1, maxpool2, maxpool3, P5])
+    P5 = DarknetConv2D_BN_Leaky(512, (1, 1))(P5)
+    P5 = DarknetConv2D_BN_Leaky(1024, (3, 3))(P5)
+    P5 = DarknetConv2D_BN_Leaky(512, (1, 1))(P5)
 
     # 13,13,512 -> 13,13,256 -> 26,26,256
-    x   = compose(DarknetConv2D_BN_Leaky(256, (1,1)), UpSampling2D(2))(x)
+    P5_upsample = compose(DarknetConv2D_BN_Leaky(256, (1, 1)), UpSampling2D(2))(P5)
+    # 26,26,512 -> 26,26,256
+    P4 = DarknetConv2D_BN_Leaky(256, (1, 1))(feat2)
+    # 26,26,256 + 26,26,256 -> 26,26,512
+    P4 = Concatenate()([P4, P5_upsample])
 
-    # 26,26,256 + 26,26,512 -> 26,26,768
-    x   = Concatenate()([x, C4])
-    #---------------------------------------------------#
-    #   Generate second FPN feature => P4 => (batch_size,26,26,3,85)
-    #---------------------------------------------------#
-    # 26,26,768 -> 26,26,256 -> 26,26,512 -> 26,26,256 -> 26,26,512 -> 26,26,256
-    x   = make_five_conv(x, 256)
-    P4  = make_yolo_head(x, 256, len(anchors_mask[1]) * (num_classes+5))
+    # 26,26,512 -> 26,26,256 -> 26,26,512 -> 26,26,256 -> 26,26,512 -> 26,26,256
+    P4 = make_five_convs(P4, 256)
 
     # 26,26,256 -> 26,26,128 -> 52,52,128
-    x   = compose(DarknetConv2D_BN_Leaky(128, (1,1)), UpSampling2D(2))(x)
-    # 52,52,128 + 52,52,256 -> 52,52,384
-    x   = Concatenate()([x, C3])
-    #---------------------------------------------------#
-    #   Generate second FPN feature => P3 => (batch_size,52,52,3,85)
-    #---------------------------------------------------#
-    # 52,52,384 -> 52,52,128 -> 52,52,256 -> 52,52,128 -> 52,52,256 -> 52,52,128
-    x   = make_five_conv(x, 128)
-    P3  = make_yolo_head(x, 128, len(anchors_mask[2]) * (num_classes+5))
-    return Model(inputs, [P5, P4, P3])
+    P4_upsample = compose(DarknetConv2D_BN_Leaky(128, (1, 1)), UpSampling2D(2))(P4)
+    # 52,52,256 -> 52,52,128
+    P3 = DarknetConv2D_BN_Leaky(128, (1, 1))(feat1)
+    # 52,52,128 + 52,52,128 -> 52,52,256
+    P3 = Concatenate()([P3, P4_upsample])
+
+    # 52,52,256 -> 52,52,128 -> 52,52,256 -> 52,52,128 -> 52,52,256 -> 52,52,128
+    P3 = make_five_convs(P3, 128)
+
+    # ---------------------------------------------------#
+    #   y3 = (batch_size,52,52,3,85)
+    # ---------------------------------------------------#
+    P3_output = DarknetConv2D_BN_Leaky(256, (3, 3))(P3)
+    P3_output = DarknetConv2D(len(anchors_mask[0]) * (num_classes + 5), (1, 1))(P3_output)
+
+    # 52,52,128 -> 26,26,256
+    P3_downsample = ZeroPadding2D(((1, 0), (1, 0)))(P3)
+    P3_downsample = DarknetConv2D_BN_Leaky(256, (3, 3), strides=(2, 2))(P3_downsample)
+    # 26,26,256 + 26,26,256 -> 26,26,512
+    P4 = Concatenate()([P3_downsample, P4])
+    # 26,26,512 -> 26,26,256 -> 26,26,512 -> 26,26,256 -> 26,26,512 -> 26,26,256
+    P4 = make_five_convs(P4, 256)
+
+    # ---------------------------------------------------#
+    #   y2 = (batch_size,26,26,3,85)
+    # ---------------------------------------------------#
+    P4_output = DarknetConv2D_BN_Leaky(512, (3, 3))(P4)
+    P4_output = DarknetConv2D(len(anchors_mask[1]) * (num_classes + 5), (1, 1))(P4_output)
+
+    # 26,26,256 -> 13,13,512
+    P4_downsample = ZeroPadding2D(((1, 0), (1, 0)))(P4)
+    P4_downsample = DarknetConv2D_BN_Leaky(512, (3, 3), strides=(2, 2))(P4_downsample)
+    # 13,13,512 + 13,13,512 -> 13,13,1024
+    P5 = Concatenate()([P4_downsample, P5])
+    # 13,13,1024 -> 13,13,512 -> 13,13,1024 -> 13,13,512 -> 13,13,1024 -> 13,13,512
+    P5 = make_five_convs(P5, 512)
+
+    # ---------------------------------------------------#
+    #   y1 = (batch_size,13,13,3,85)
+    # ---------------------------------------------------#
+    P5_output = DarknetConv2D_BN_Leaky(1024, (3, 3))(P5)
+    P5_output = DarknetConv2D(len(anchors_mask[2]) * (num_classes + 5), (1, 1))(P5_output)
+
+    return Model(inputs, [P5_output, P4_output, P3_output])
 
 
-#---------------------------------------------------#
-#   Construct model
-#---------------------------------------------------#
-def get_train_model(model_body, input_shape, num_classes, anchors, anchors_mask):
-    y_true = [Input(shape = (input_shape[0] // {0:32, 1:16, 2:8}[l], input_shape[1] // {0:32, 1:16, 2:8}[l], \
-                                len(anchors_mask[l]), num_classes + 5)) for l in range(len(anchors_mask))]
-    model_loss  = Lambda(
-        yolo_loss, 
-        output_shape    = (1, ), 
-        name            = 'yolo_loss', 
-        arguments       = {'input_shape' : input_shape, 'anchors' : anchors, 'anchors_mask' : anchors_mask, 'num_classes' : num_classes}
+def get_train_model(model_body, input_shape, num_classes, anchors, anchors_mask, label_smoothing):
+    y_true = [Input(shape=(input_shape[0] // {0: 32, 1: 16, 2: 8}[l], input_shape[1] // {0: 32, 1: 16, 2: 8}[l], \
+                           len(anchors_mask[l]), num_classes + 5)) for l in range(len(anchors_mask))]
+    model_loss = Lambda(
+        yolo_loss,
+        output_shape=(1,),
+        name='yolo_loss',
+        arguments={'input_shape': input_shape, 'anchors': anchors, 'anchors_mask': anchors_mask,
+                   'num_classes': num_classes, 'label_smoothing': label_smoothing}
     )([*model_body.output, *y_true])
-    model       = Model([model_body.input, *y_true], model_loss)
+    model = Model([model_body.input, *y_true], model_loss)
     return model
