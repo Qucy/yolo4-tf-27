@@ -305,7 +305,7 @@ For instance, if we are doing binary classification and our ground truth label i
 
 In YoloV3 we use bounding box x, y, width and height to calculate bounding box regression loss.  Can we use IoU to calculate bounding box loss instead of using coordinates, height and width directly.  Yes, we can but using IoU directly will have a problem, if predicted box and ground truth box have no overlap then IoU will be zero and model will become hard to train.
 
-Then someone raised other optimized IoU losses like GIoU, DIoU and CIoU. We will not discuss all of this in this article but if you are interested, you can read this article -> [Variants of IoU {GIoU, DIoU, CIoU}](!https://medium.com/nerd-for-tech/day-90-dl-variants-of-iou-giou-diou-6c0a933dd2c7)  to know more about these losses.
+Then someone raised other optimized IoU losses like GIoU, DIoU and CIoU. We will not discuss all of this in this article but if you are interested, you can read this article -> [Variants of IoU](https://medium.com/nerd-for-tech/day-90-dl-variants-of-iou-giou-diou-6c0a933dd2c7)  to know more about these losses.
 
 For CIoU the formula is as below, it will consider (a) IoU which is overlap area, (b) central point distance, (c) the aspect ratio. Based on these parameters CIoU is computed. CIoU is a variant of DIoU with additional term representing the aspect ratio.
 
