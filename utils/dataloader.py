@@ -207,6 +207,13 @@ class YoloDatasets(keras.utils.Sequence):
         return image_data, box_data
 
     def merge_bboxes(self, bboxes, cutx, cuty):
+        """
+        Adjust bounding box coordinates
+        :param bboxes: bounding boxes
+        :param cutx: cut point x coordinate
+        :param cuty: cut point y coordinate
+        :return: adjusted coordinates
+        """
         merge_bbox = []
         for i in range(len(bboxes)):
             for box in bboxes[i]:

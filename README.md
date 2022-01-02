@@ -285,7 +285,7 @@ The implementation steps for Mosaic have 3 steps,  randomly pick 4 images and sc
 
 #### 2.2 Label smoothing
 
-Label smoothing is a quite simple and formula is as below:
+Label smoothing formula is as below:
 
 ```python
 new_onehot_labels = onehot_labels * (1 - label_smoothing) + label_smoothing / num_classes
@@ -301,12 +301,161 @@ For instance, if we are doing binary classification and our ground truth label i
 
 
 
-#### 2.3 CIOU
+#### 2.3 CIoU - Complete Intersection Over Union
 
-Coming soon
+In YoloV3 we use bounding box x, y, width and height to calculate bounding box regression loss.  Can we use IoU to calculate bounding box loss instead of using coordinates, height and width directly.  Yes, we can but using IoU directly will have a problem, if predicted box and ground truth box have no overlap then IoU will be zero and model will become hard to train.
+
+Then someone raised other optimized IoU losses like GIoU, DIoU and CIoU. We will not discuss all of this in this article but if you are interested, you can read this article -> [Variants of IoU {GIoU, DIoU, CIoU}](!https://medium.com/nerd-for-tech/day-90-dl-variants-of-iou-giou-diou-6c0a933dd2c7)  to know more about these losses.
+
+For CIoU the formula is as below, it will consider (a) IoU which is overlap area, (b) central point distance, (c) the aspect ratio. Based on these parameters CIoU is computed. CIoU is a variant of DIoU with additional term representing the aspect ratio.
+
+![CIoU](https://github.com/Qucy/yolo4-tf-27/blob/master/img/CIoU.jpg)
+
+Source code is as below
+
+```python
+def box_ciou(b1, b2):
+    """
+    calc ciou
+    :param b1: tensor, shape=(batch, feat_w, feat_h, anchor_num, 4), xywh
+    :param b2: tensor, shape=(batch, feat_w, feat_h, anchor_num, 4), xywh
+    :return: ciou: tensor, shape=(batch, feat_w, feat_h, anchor_num, 1)
+    """
+    # -----------------------------------------------------------#
+    #   calculate predicted box top left and right bottom coordinates
+    #   b1_mins     (batch, feat_w, feat_h, anchor_num, 2)
+    #   b1_maxes    (batch, feat_w, feat_h, anchor_num, 2)
+    # -----------------------------------------------------------#
+    b1_xy = b1[..., :2]
+    b1_wh = b1[..., 2:4]
+    b1_wh_half = b1_wh / 2.
+    b1_mins = b1_xy - b1_wh_half
+    b1_maxes = b1_xy + b1_wh_half
+    # -----------------------------------------------------------#
+    #   calculate ground truth box top left and right bottom coordinates
+    #   b2_mins     (batch, feat_w, feat_h, anchor_num, 2)
+    #   b2_maxes    (batch, feat_w, feat_h, anchor_num, 2)
+    # -----------------------------------------------------------#
+    b2_xy = b2[..., :2]
+    b2_wh = b2[..., 2:4]
+    b2_wh_half = b2_wh / 2.
+    b2_mins = b2_xy - b2_wh_half
+    b2_maxes = b2_xy + b2_wh_half
+
+    # -----------------------------------------------------------#
+    #   calc iou between prediction and ground truth
+    #   iou => (batch, feat_w, feat_h, anchor_num)
+    # -----------------------------------------------------------#
+    intersect_mins = K.maximum(b1_mins, b2_mins)
+    intersect_maxes = K.minimum(b1_maxes, b2_maxes)
+    intersect_wh = K.maximum(intersect_maxes - intersect_mins, 0.)
+    intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1]
+    b1_area = b1_wh[..., 0] * b1_wh[..., 1]
+    b2_area = b2_wh[..., 0] * b2_wh[..., 1]
+    union_area = b1_area + b2_area - intersect_area
+    iou = intersect_area / K.maximum(union_area, K.epsilon())
+
+    # -----------------------------------------------------------#
+    #   calc center point Euclidean distance
+    #   center_distance (batch, feat_w, feat_h, anchor_num)
+    # -----------------------------------------------------------#
+    center_distance = K.sum(K.square(b1_xy - b2_xy), axis=-1)
+    enclose_mins = K.minimum(b1_mins, b2_mins)
+    enclose_maxes = K.maximum(b1_maxes, b2_maxes)
+    enclose_wh = K.maximum(enclose_maxes - enclose_mins, 0.0)
+    # -----------------------------------------------------------#
+    #   calc diagonal length
+    #   enclose_diagonal (batch, feat_w, feat_h, anchor_num)
+    # -----------------------------------------------------------#
+    enclose_diagonal = K.sum(K.square(enclose_wh), axis=-1)
+    ciou = iou - 1.0 * (center_distance) / K.maximum(enclose_diagonal, K.epsilon())
+
+    v = 4 * K.square(tf.math.atan2(b1_wh[..., 0], K.maximum(b1_wh[..., 1], K.epsilon())) - tf.math.atan2(b2_wh[..., 0],
+                                                                                                         K.maximum(
+                                                                                                             b2_wh[
+                                                                                                                 ..., 1],
+                                                                                                             K.epsilon()))) / (
+                    math.pi * math.pi)
+    alpha = v / K.maximum((1.0 - iou + v), K.epsilon())
+    ciou = ciou - alpha * v
+
+    ciou = K.expand_dims(ciou, -1)
+    return ciou
+```
 
 
 
-#### 2.4 Cosine annealing learning rate
+#### 2.4 Cosine annealing and warm restart learning scheduler
 
-Coming soon
+The cosine annealed warm restart learning schedule has two parts, cosine annealing and warm restarts.
+
+- **Cosine annealing** means that the cosine function is used as the learning rate annealing function. The cosine function has been shown to perform better than alternatives like simple linear annealing in practice.
+
+- **Warm restarts** is the interesting part: it means that every so often, the learning rate is restated.
+
+Cosine annealing has an ideas core to a good learning rate scheduler nowadays: periods with high learning rates and periods with low ones. The function of the periods of high learning rates in the scheduler is to prevent the learner from getting stuck in a local cost minima; the function of the periods of low learning rates in the scheduler is to allow it to converge to a near-true-optimal point within the (hopefully) global minima it finds.
+
+![consine_annel](https://github.com/Qucy/yolo4-tf-27/blob/master/img/consine_annel.jpg)
+
+Source code is as below, we can use callback function to implement this.
+
+```python
+class WarmUpCosineDecayScheduler(keras.callbacks.Callback):
+    """
+    Customized call back function to implement cosine decay for lr
+    """
+    def __init__(self, T_max, eta_min=0, verbose=0):
+        super(WarmUpCosineDecayScheduler, self).__init__()
+        self.T_max = T_max
+        self.eta_min = eta_min
+        self.verbose = verbose
+        self.init_lr = 0
+        self.last_epoch = 0
+
+    def on_train_begin(self, batch, logs=None):
+        self.init_lr = K.get_value(self.model.optimizer.lr)
+
+    def on_epoch_end(self, batch, logs=None):
+        learning_rate = self.eta_min + (self.init_lr - self.eta_min) * (1 + math.cos(math.pi * self.last_epoch / self.T_max)) / 2
+        self.last_epoch += 1
+
+        K.set_value(self.model.optimizer.lr, learning_rate)
+        if self.verbose > 0:
+            print('Setting learning rate to %s.' % (learning_rate))
+```
+
+
+
+### 3. Train your model
+
+#### 3.1 Prepare your dataset
+
+To train your model you need prepare your datasets first, you can use VOC datasets or COCO datasets to train your model.
+
+For VOC datasets you can download here http://host.robots.ox.ac.uk/pascal/VOC/
+
+For COCO datasets you can download here https://cocodataset.org/#download
+
+But for your own data you need to install a image label tool to label your data first:
+
+You can use pip to install LabelImage and label your own image. link -> https://pypi.org/project/labelImg/
+
+
+
+#### 3.2 Preprocess your dataset
+
+Before to train your model, we need to preprocess our dataset, since the the VOC or COCO dataset's annotation is in XML format. We need to process it via **voc_annotation.py**.  Change your dataset path accordingly and change annotation_mode = 2 to generate train and validation dataset.
+
+After preprocess your dataset successfully you should see 2007_train.txt and 2007_val.txt.
+
+
+
+#### 3.3 Train your model
+
+By using **voc_annotation.py** we've generated our training and testing datasets. By point our train path to these 2 files and we run train.py file to kickoff the training. Of course you can change the hyper parameter in the train.py and the model weights will be saved in logs file every epoch.
+
+
+
+#### 3.4 Make predictions !
+
+After your model is trained, you can modify the model weights file path point to the latest weights file path in the logs folder. And input the image path or folder and run predict.py to trigger the prediction.
