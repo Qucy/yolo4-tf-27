@@ -5,8 +5,7 @@ from tensorflow.keras.callbacks import EarlyStopping, TensorBoard
 from tensorflow.keras.optimizers import Adam
 
 from nets.yolo import get_train_model, yolo_body
-from utils.callbacks import (ExponentDecayScheduler, LossHistory,
-                             ModelCheckpoint, WarmUpCosineDecayScheduler)
+from utils.callbacks import (ExponentDecayScheduler, LossHistory, ModelCheckpoint, WarmUpCosineDecayScheduler)
 from utils.dataloader import YoloDatasets
 from utils.utils import get_anchors, get_classes
 from utils.utils_fit import fit_one_epoch
@@ -64,7 +63,7 @@ if __name__ == "__main__":
     #   网络一般不从0开始训练，至少会使用主干部分的权值，有些论文提到可以不用预训练，主要原因是他们 数据集较大 且 调参能力优秀。
     #   如果一定要训练网络的主干部分，可以了解imagenet数据集，首先训练分类模型，分类模型的 主干部分 和该模型通用，基于此进行训练。
     # ----------------------------------------------------------------------------------------------------------------------------#
-    model_path = 'model_data/yolo4_weight.h5'
+    model_path = 'model_data/yolo4_voc_weights.h5'
     # ------------------------------------------------------#
     #   输入的shape大小，一定要是32的倍数
     # ------------------------------------------------------#
@@ -77,8 +76,8 @@ if __name__ == "__main__":
     #   label_smoothing 标签平滑 0.01以下一般 如0.01、0.005
     # ------------------------------------------------------#
     mosaic = False
-    Cosine_scheduler = False
-    label_smoothing = 0
+    Cosine_scheduler = True
+    label_smoothing = 0.01
 
     # ----------------------------------------------------#
     #   训练分为两个阶段，分别是冻结阶段和解冻阶段。
@@ -147,8 +146,7 @@ if __name__ == "__main__":
     #   early_stopping用于设定早停，val_loss多次不下降自动结束训练，表示模型基本收敛
     # -------------------------------------------------------------------------------#
     logging = TensorBoard(log_dir='logs/')
-    checkpoint = ModelCheckpoint('logs/ep{epoch:03d}-loss{loss:.3f}-val_loss{val_loss:.3f}.h5',
-                                 monitor='val_loss', save_weights_only=True, save_best_only=False, period=1)
+    checkpoint = ModelCheckpoint('logs/ep{epoch:03d}-loss{loss:.3f}-val_loss{val_loss:.3f}.h5', monitor='val_loss', save_weights_only=True, save_best_only=False, period=1)
     if Cosine_scheduler:
         reduce_lr = WarmUpCosineDecayScheduler(T_max=5, eta_min=1e-5)
     else:
@@ -191,36 +189,29 @@ if __name__ == "__main__":
         if epoch_step == 0 or epoch_step_val == 0:
             raise ValueError('数据集过小，无法进行训练，请扩充数据集。')
 
-        train_dataloader = YoloDatasets(train_lines, input_shape, anchors, batch_size, num_classes, anchors_mask,
-                                        mosaic=mosaic, train=True)
-        val_dataloader = YoloDatasets(val_lines, input_shape, anchors, batch_size, num_classes, anchors_mask,
-                                      mosaic=False, train=False)
+        train_dataloader = YoloDatasets(train_lines, input_shape, anchors, batch_size, num_classes, anchors_mask, mosaic=mosaic, train=True)
+        val_dataloader = YoloDatasets(val_lines, input_shape, anchors, batch_size, num_classes, anchors_mask, mosaic=False, train=False)
 
         print('Train on {} samples, val on {} samples, with batch size {}.'.format(num_train, num_val, batch_size))
         if eager:
-            gen = tf.data.Dataset.from_generator(partial(train_dataloader.generate),
-                                                 (tf.float32, tf.float32, tf.float32, tf.float32))
-            gen_val = tf.data.Dataset.from_generator(partial(val_dataloader.generate),
-                                                     (tf.float32, tf.float32, tf.float32, tf.float32))
+            gen = tf.data.Dataset.from_generator(partial(train_dataloader.generate), (tf.float32, tf.float32, tf.float32, tf.float32))
+            gen_val = tf.data.Dataset.from_generator(partial(val_dataloader.generate), (tf.float32, tf.float32, tf.float32, tf.float32))
 
             gen = gen.shuffle(buffer_size=batch_size).prefetch(buffer_size=batch_size)
             gen_val = gen_val.shuffle(buffer_size=batch_size).prefetch(buffer_size=batch_size)
 
             if Cosine_scheduler:
-                lr_schedule = tf.keras.experimental.CosineDecayRestarts(
-                    initial_learning_rate=lr, first_decay_steps=5 * epoch_step, t_mul=1.0, alpha=1e-2)
+                lr_schedule = tf.keras.experimental.CosineDecayRestarts(initial_learning_rate=lr, first_decay_steps=5 * epoch_step, t_mul=1.0, alpha=1e-2)
             else:
-                lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-                    initial_learning_rate=lr, decay_steps=epoch_step, decay_rate=0.94, staircase=True)
+                lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(initial_learning_rate=lr, decay_steps=epoch_step, decay_rate=0.94, staircase=True)
 
             optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
             for epoch in range(start_epoch, end_epoch):
-                fit_one_epoch(model_body, loss_history, optimizer, epoch, epoch_step, epoch_step_val, gen, gen_val,
-                              end_epoch, input_shape, anchors, anchors_mask, num_classes, label_smoothing)
+                fit_one_epoch(model_body, loss_history, optimizer, epoch, epoch_step, epoch_step_val, gen, gen_val, end_epoch, input_shape, anchors, anchors_mask, num_classes, label_smoothing)
 
         else:
-            model.compile(optimizer=Adam(lr=lr), loss={'yolo_loss': lambda y_true, y_pred: y_pred})
+            model.compile(optimizer=Adam(learning_rate=lr), loss={'yolo_loss': lambda y_true, y_pred: y_pred})
 
             model.fit_generator(
                 generator=train_dataloader,
@@ -249,36 +240,29 @@ if __name__ == "__main__":
         if epoch_step == 0 or epoch_step_val == 0:
             raise ValueError('数据集过小，无法进行训练，请扩充数据集。')
 
-        train_dataloader = YoloDatasets(train_lines, input_shape, anchors, batch_size, num_classes, anchors_mask,
-                                        mosaic=mosaic, train=True)
-        val_dataloader = YoloDatasets(val_lines, input_shape, anchors, batch_size, num_classes, anchors_mask,
-                                      mosaic=False, train=False)
+        train_dataloader = YoloDatasets(train_lines, input_shape, anchors, batch_size, num_classes, anchors_mask, mosaic=mosaic, train=True)
+        val_dataloader = YoloDatasets(val_lines, input_shape, anchors, batch_size, num_classes, anchors_mask, mosaic=False, train=False)
 
         print('Train on {} samples, val on {} samples, with batch size {}.'.format(num_train, num_val, batch_size))
         if eager:
-            gen = tf.data.Dataset.from_generator(partial(train_dataloader.generate),
-                                                 (tf.float32, tf.float32, tf.float32, tf.float32))
-            gen_val = tf.data.Dataset.from_generator(partial(val_dataloader.generate),
-                                                     (tf.float32, tf.float32, tf.float32, tf.float32))
+            gen = tf.data.Dataset.from_generator(partial(train_dataloader.generate), (tf.float32, tf.float32, tf.float32, tf.float32))
+            gen_val = tf.data.Dataset.from_generator(partial(val_dataloader.generate), (tf.float32, tf.float32, tf.float32, tf.float32))
 
             gen = gen.shuffle(buffer_size=batch_size).prefetch(buffer_size=batch_size)
             gen_val = gen_val.shuffle(buffer_size=batch_size).prefetch(buffer_size=batch_size)
 
             if Cosine_scheduler:
-                lr_schedule = tf.keras.experimental.CosineDecayRestarts(
-                    initial_learning_rate=lr, first_decay_steps=5 * epoch_step, t_mul=1.0, alpha=1e-2)
+                lr_schedule = tf.keras.experimental.CosineDecayRestarts(initial_learning_rate=lr, first_decay_steps=5 * epoch_step, t_mul=1.0, alpha=1e-2)
             else:
-                lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-                    initial_learning_rate=lr, decay_steps=epoch_step, decay_rate=0.94, staircase=True)
+                lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(initial_learning_rate=lr, decay_steps=epoch_step, decay_rate=0.94, staircase=True)
 
             optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
             for epoch in range(start_epoch, end_epoch):
-                fit_one_epoch(model_body, loss_history, optimizer, epoch, epoch_step, epoch_step_val, gen, gen_val,
-                              end_epoch, input_shape, anchors, anchors_mask, num_classes, label_smoothing)
+                fit_one_epoch(model_body, loss_history, optimizer, epoch, epoch_step, epoch_step_val, gen, gen_val, end_epoch, input_shape, anchors, anchors_mask, num_classes, label_smoothing)
 
         else:
-            model.compile(optimizer=Adam(lr=lr), loss={'yolo_loss': lambda y_true, y_pred: y_pred})
+            model.compile(optimizer=Adam(learning_rate=lr), loss={'yolo_loss': lambda y_true, y_pred: y_pred})
 
             model.fit_generator(
                 generator=train_dataloader,
