@@ -436,6 +436,16 @@ For VOC datasets you can download here http://host.robots.ox.ac.uk/pascal/VOC/
 
 For COCO datasets you can download here https://cocodataset.org/#download
 
+Take VOC datasets for example, after download your dataset you should see a folder named **VOCdevkit** and under this folder you should see 5 sub folders. For object detection we are going to use folder**Annotations** and **JPEGImages**.
+
+- Annotations: contains all the bounding box coordinate information and files looks like below.
+
+![annotations](https://github.com/Qucy/yolo4-tf-27/blob/master/img/annotations.jpg )
+
+- JPEGImages: contains all the source image and image name is aligned with annotation file name, files looks like below.
+
+![images](https://github.com/Qucy/yolo4-tf-27/blob/master/img/images.jpg)
+
 But for your own data you need to install a image label tool to label your data first:
 
 You can use pip to install LabelImage and label your own image. link -> https://pypi.org/project/labelImg/
